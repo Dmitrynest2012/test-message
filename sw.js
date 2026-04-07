@@ -15,7 +15,7 @@ const ASSETS = [
   'data-message.xlsx',
   'img/message-base-1.png',      // Относительный путь к картинке
   'img/message-random-1.jpg',
-  'in_message_music.mp3',
+  'music/in_message_music.mp3',
   'quatrains_about_the_message.xlsx'
 ];
 
