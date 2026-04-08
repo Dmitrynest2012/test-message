@@ -17,6 +17,11 @@ const ASSETS = [
   'img/message-base-1.png',      // Относительный путь к картинке
   'img/message-random-1.jpg',
   'music/in_message_music.mp3',
+  'sound_of_a_bell_2.wav',
+  'sound_of_a_bell.mp3',
+  'sound_of_interval_end.mp3',
+  'warning.mp3',
+  'sound_of_notification.mp3',
   'quatrains_about_the_message.xlsx'
 ];
 
