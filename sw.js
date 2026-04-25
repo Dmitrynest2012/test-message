@@ -27,14 +27,14 @@ const ASSETS = [
 const EXCEL_FILES = ['data-message.xlsx', 'quatrains_about_the_message.xlsx'];
 const ONE_DAY = 24 * 60 * 60 * 1000;
 
-// Установка: быстрая активация
+// 1. Установка: фоновая загрузка ядра сайта
 self.addEventListener('install', (event) => {
   self.skipWaiting();
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      // Запускаем фоновую загрузку всего списка
       ASSETS.forEach(url => {
         cache.match(url).then(response => {
+          // Догружаем только то, чего еще нет в кэше
           if (!response) cache.add(url).catch(() => {});
         });
       });
@@ -42,6 +42,7 @@ self.addEventListener('install', (event) => {
   );
 });
 
+// 2. Активация: очистка старых версий кэша
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => Promise.all(
@@ -50,59 +51,62 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+// 3. Обработка запросов (Fetch)
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   const isExcel = EXCEL_FILES.some(path => url.pathname.endsWith(path));
 
-  // --- ЛОГИКА ДЛЯ EXCEL ---
+  // --- ЛОГИКА ДЛЯ EXCEL (Минимальное вмешательство) ---
   if (isExcel) {
     event.respondWith(
       (async () => {
         const cache = await caches.open(CACHE_NAME);
         const cachedResponse = await cache.match(event.request);
-        
-        try {
-          const now = Date.now();
-          const lastChecked = cachedResponse ? parseInt(cachedResponse.headers.get('date-cached') || 0) : 0;
+        const now = Date.now();
+        const lastChecked = cachedResponse ? parseInt(cachedResponse.headers.get('date-cached') || 0) : 0;
 
-          // Если прошло > 24 часов ИЛИ файла нет в кэше — идем в сеть
-          if (!cachedResponse || (now - lastChecked > ONE_DAY)) {
-            const networkResponse = await fetch(event.request);
-            
-            if (networkResponse.ok) {
-              // Создаем новый Response, чтобы добавить метку времени
-              const newHeaders = new Headers(networkResponse.headers);
-              newHeaders.append('date-cached', now.toString());
-              
-              const responseToSave = new Response(await networkResponse.blob(), {
-                status: networkResponse.status,
-                statusText: networkResponse.statusText,
-                headers: newHeaders
-              });
-
-              await cache.put(event.request, responseToSave.clone());
-              return responseToSave;
-            }
+        // Если файл в кэше есть и 24 часа НЕ ПРОШЛИ — просто пропускаем запрос в сеть (как обычный браузер)
+        if (cachedResponse && (now - lastChecked < ONE_DAY)) {
+          try {
+            return await fetch(event.request); 
+          } catch (err) {
+            return cachedResponse; // Если сеть внезапно пропала — отдаем кэш
           }
-          // Если 24 часа не прошло ИЛИ сеть упала — отдаем кэш
-          return cachedResponse || fetch(event.request);
+        }
+
+        // Если прошло > 24 часов или файла нет — идем в сеть и обновляем кэш
+        try {
+          const networkResponse = await fetch(event.request);
+          if (networkResponse.ok) {
+            const newHeaders = new Headers(networkResponse.headers);
+            newHeaders.append('date-cached', now.toString());
+            
+            const responseToSave = new Response(await networkResponse.blob(), {
+              status: networkResponse.status,
+              statusText: networkResponse.statusText,
+              headers: newHeaders
+            });
+
+            await cache.put(event.request, responseToSave.clone());
+            return responseToSave;
+          }
+          return cachedResponse || networkResponse;
         } catch (err) {
-          return cachedResponse;
+          return cachedResponse; // Оффлайн
         }
       })()
     );
     return;
   }
 
-  // --- ОБЩАЯ ЛОГИКА (Остальные файлы) ---
+  // --- ОБЩАЯ ЛОГИКА (Сначала Кэш, Фоновое обновление) ---
   if (!event.request.url.startsWith(self.location.origin)) return;
 
   event.respondWith(
     caches.open(CACHE_NAME).then(async (cache) => {
       const cachedResponse = await cache.match(event.request);
 
-      // Фоновое обновление: запрос идет всегда, но браузер скачает данные 
-      // целиком только если файл на сервере РЕАЛЬНО изменился (304 Not Modified)
+      // Фоновое обновление для актуальности (браузер сам решит, качать ли тело файла через 304 статус)
       const fetchPromise = fetch(event.request).then((networkResponse) => {
         if (networkResponse.ok) {
           cache.put(event.request, networkResponse.clone());
@@ -110,12 +114,13 @@ self.addEventListener('fetch', (event) => {
         return networkResponse;
       }).catch(() => {});
 
-      // Возвращаем кэш мгновенно, если он есть, иначе ждем сеть
+      // Мгновенная отдача из кэша. Если файла нет (не успел докачаться) — ждем сеть.
       return cachedResponse || fetchPromise;
     })
   );
 });
 
+// 4. Принудительное обновление из основного JS
 self.addEventListener('message', (event) => {
   if (event.data === 'FORCE_UPDATE_EXCEL') {
     caches.open(CACHE_NAME).then((cache) => {
