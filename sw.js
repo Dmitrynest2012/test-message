@@ -1,9 +1,8 @@
 const CACHE_NAME = 'my-site-v1';
 
-// 1. Список "ядра" сайта для предварительного кэширования
 const ASSETS = [
-  './',                          // Текущая папка (вместо '/')
-  'index.html',                  // Убрали '/' в начале
+  './', 
+  'index.html',
   'styles.css',
   'script.js',
   'time.js',
@@ -14,7 +13,7 @@ const ASSETS = [
   'xlsx.full.min.js',
   'message_love.ico',
   'data-message.xlsx',
-  'img/message-base-1.png',      // Относительный путь к картинке
+  'img/message-base-1.png',
   'img/message-random-1.jpg',
   'music/in_message_music.mp3',
   'sound_of_a_bell_2.wav',
@@ -25,71 +24,69 @@ const ASSETS = [
   'quatrains_about_the_message.xlsx'
 ];
 
-
-// Список Excel-файлов с особой логикой (всегда сеть, если она есть)
 const EXCEL_FILES = ['data-message.xlsx', 'quatrains_about_the_message.xlsx'];
-const ONE_DAY = 24 * 60 * 60 * 1000; // 24 часа в миллисекундах
+const ONE_DAY = 24 * 60 * 60 * 1000;
 
-// Установка: Кэшируем всё из списка ASSETS
+// Установка: быстрая активация
 self.addEventListener('install', (event) => {
+  self.skipWaiting();
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      console.log('[SW] Кэширование базовых ресурсов при установке');
-      return cache.addAll(ASSETS);
-    }).then(() => self.skipWaiting())
+      // Запускаем фоновую загрузку всего списка
+      ASSETS.forEach(url => {
+        cache.match(url).then(response => {
+          if (!response) cache.add(url).catch(() => {});
+        });
+      });
+    })
   );
 });
 
-// Активация: Удаление старых версий кэша
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => Promise.all(
       keys.map((key) => key !== CACHE_NAME ? caches.delete(key) : null)
-    ))
+    )).then(() => self.clients.claim())
   );
 });
 
-// Обработка запросов (Fetch)
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   const isExcel = EXCEL_FILES.some(path => url.pathname.endsWith(path));
 
-  // --- ЛОГИКА ДЛЯ EXCEL ФАЙЛОВ ---
+  // --- ЛОГИКА ДЛЯ EXCEL ---
   if (isExcel) {
     event.respondWith(
       (async () => {
         const cache = await caches.open(CACHE_NAME);
         const cachedResponse = await cache.match(event.request);
-
+        
         try {
-          // Если есть сеть — ВСЕГДА идем на сервер за свежим файлом
-          const networkResponse = await fetch(event.request);
+          const now = Date.now();
+          const lastChecked = cachedResponse ? parseInt(cachedResponse.headers.get('date-cached') || 0) : 0;
 
-          if (networkResponse.ok) {
-            const now = Date.now();
-            const lastChecked = cachedResponse ? parseInt(cachedResponse.headers.get('date-cached') || 0) : 0;
-
-            // Обновляем копию в кэше только если прошло более 24 часов
-            if (!cachedResponse || (now - lastChecked > ONE_DAY)) {
-              console.log(`[SW] Обновляем кэш для ${url.pathname} (прошло более суток)`);
-              const blob = await networkResponse.blob();
-              const newResponse = new Response(blob, {
+          // Если прошло > 24 часов ИЛИ файла нет в кэше — идем в сеть
+          if (!cachedResponse || (now - lastChecked > ONE_DAY)) {
+            const networkResponse = await fetch(event.request);
+            
+            if (networkResponse.ok) {
+              // Создаем новый Response, чтобы добавить метку времени
+              const newHeaders = new Headers(networkResponse.headers);
+              newHeaders.append('date-cached', now.toString());
+              
+              const responseToSave = new Response(await networkResponse.blob(), {
                 status: networkResponse.status,
                 statusText: networkResponse.statusText,
-                headers: new Headers(networkResponse.headers)
+                headers: newHeaders
               });
-              newResponse.headers.append('date-cached', now.toString());
-              await cache.put(event.request, newResponse.clone());
-              return newResponse;
+
+              await cache.put(event.request, responseToSave.clone());
+              return responseToSave;
             }
-            
-            // Если сеть есть, но 24 часа не прошли — просто отдаем файл из сети (не трогая кэш)
-            return networkResponse;
           }
-          return cachedResponse; // Ошибка сервера (500 и т.д.) — берем из кэша
+          // Если 24 часа не прошло ИЛИ сеть упала — отдаем кэш
+          return cachedResponse || fetch(event.request);
         } catch (err) {
-          // СЕТИ НЕТ (Офлайн) — берем из кэша
-          console.log(`[SW] Офлайн режим для ${url.pathname}`);
           return cachedResponse;
         }
       })()
@@ -97,33 +94,38 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // --- ОБЩАЯ ЛОГИКА ДЛЯ ОСТАЛЬНЫХ ФАЙЛОВ (Сначала Кэш + Фоновое обновление) ---
+  // --- ОБЩАЯ ЛОГИКА (Остальные файлы) ---
   if (!event.request.url.startsWith(self.location.origin)) return;
 
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
+    caches.open(CACHE_NAME).then(async (cache) => {
+      const cachedResponse = await cache.match(event.request);
+
+      // Фоновое обновление: запрос идет всегда, но браузер скачает данные 
+      // целиком только если файл на сервере РЕАЛЬНО изменился (304 Not Modified)
       const fetchPromise = fetch(event.request).then((networkResponse) => {
-        if (networkResponse && networkResponse.status === 200) {
-          const responseToCache = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseToCache);
-          });
+        if (networkResponse.ok) {
+          cache.put(event.request, networkResponse.clone());
         }
         return networkResponse;
       }).catch(() => {});
 
+      // Возвращаем кэш мгновенно, если он есть, иначе ждем сеть
       return cachedResponse || fetchPromise;
     })
   );
 });
 
-// Слушатель для принудительного сброса кэша из основного JS-кода
 self.addEventListener('message', (event) => {
   if (event.data === 'FORCE_UPDATE_EXCEL') {
-    console.log('[SW] Принудительная очистка Excel-файлов из кэша');
     caches.open(CACHE_NAME).then((cache) => {
-      EXCEL_FILES.forEach(file => cache.delete(file));
+      EXCEL_FILES.forEach(file => {
+        cache.keys().then(keys => {
+          keys.forEach(request => {
+            if (request.url.includes(file)) cache.delete(request);
+          });
+        });
+      });
     });
   }
 });
-
